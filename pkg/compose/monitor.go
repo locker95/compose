@@ -30,35 +30,35 @@ import (
 )
 
 type monitor struct {
-	apiClient client.APIClient
-	project   string
+	apiClient   client.APIClient
+	projectName string
 	// services tells us which service to consider and those we can ignore, maybe ran by a concurrent compose command
 	services  map[string]bool
 	listeners []api.ContainerEventListener
 }
 
-func newMonitor(apiClient client.APIClient, project string) *monitor {
+func newMonitor(apiClient client.APIClient, projectName string) *monitor {
 	return &monitor{
-		apiClient: apiClient,
-		project:   project,
-		services:  map[string]bool{},
+		apiClient:   apiClient,
+		projectName: projectName,
+		services:    map[string]bool{},
 	}
 }
 
-func (c *monitor) withServices(services []string) {
+func (m *monitor) withServices(services []string) {
 	for _, name := range services {
-		c.services[name] = true
+		m.services[name] = true
 	}
 }
 
 // Start runs monitor to detect application events and return after termination
 //
 //nolint:gocyclo
-func (c *monitor) Start(ctx context.Context) error {
+func (m *monitor) Start(ctx context.Context) error {
 	// collect initial application container
-	initialState, err := c.apiClient.ContainerList(ctx, client.ContainerListOptions{
+	initialState, err := m.apiClient.ContainerList(ctx, client.ContainerListOptions{
 		All: true,
-		Filters: projectFilter(c.project).Add("label",
+		Filters: projectFilter(m.projectName).Add("label",
 			oneOffFilter(false),
 			api.ConfigHashLabel,
 		),
@@ -70,14 +70,14 @@ func (c *monitor) Start(ctx context.Context) error {
 	// containers is the set if container IDs the application is based on
 	containers := utils.Set[string]{}
 	for _, ctr := range initialState.Items {
-		if len(c.services) == 0 || c.services[ctr.Labels[api.ServiceLabel]] {
+		if len(m.services) == 0 || m.services[ctr.Labels[api.ServiceLabel]] {
 			containers.Add(ctr.ID)
 		}
 	}
 	restarting := utils.Set[string]{}
 
-	res := c.apiClient.Events(ctx, client.EventsListOptions{
-		Filters: projectFilter(c.project).Add("type", "container").Add("label", oneOffFilter(false)),
+	res := m.apiClient.Events(ctx, client.EventsListOptions{
+		Filters: projectFilter(m.projectName).Add("type", "container").Add("label", oneOffFilter(false)),
 	})
 	for {
 		if len(containers) == 0 {
@@ -89,24 +89,24 @@ func (c *monitor) Start(ctx context.Context) error {
 		case err := <-res.Err:
 			return err
 		case event := <-res.Messages:
-			if len(c.services) > 0 && !c.services[event.Actor.Attributes[api.ServiceLabel]] {
+			if len(m.services) > 0 && !m.services[event.Actor.Attributes[api.ServiceLabel]] {
 				continue
 			}
-			ctr, err := c.getContainerSummary(event)
+			ctr, err := m.getContainerSummary(event)
 			if err != nil {
 				return err
 			}
 
 			switch event.Action {
 			case events.ActionCreate:
-				if len(c.services) == 0 || c.services[ctr.Labels[api.ServiceLabel]] {
+				if len(m.services) == 0 || m.services[ctr.Labels[api.ServiceLabel]] {
 					containers.Add(ctr.ID)
 				}
 				evtType := api.ContainerEventCreated
 				if _, ok := ctr.Labels[api.ContainerReplaceLabel]; ok {
 					evtType = api.ContainerEventRecreated
 				}
-				for _, listener := range c.listeners {
+				for _, listener := range m.listeners {
 					listener(newContainerEvent(event.TimeNano, ctr, evtType))
 				}
 				logrus.Debugf("container %s created", ctr.Name)
@@ -114,28 +114,28 @@ func (c *monitor) Start(ctx context.Context) error {
 				restarted := restarting.Has(ctr.ID)
 				if restarted {
 					logrus.Debugf("container %s restarted", ctr.Name)
-					for _, listener := range c.listeners {
+					for _, listener := range m.listeners {
 						listener(newContainerEvent(event.TimeNano, ctr, api.ContainerEventStarted, func(e *api.ContainerEvent) {
 							e.Restarting = restarted
 						}))
 					}
 				} else {
 					logrus.Debugf("container %s started", ctr.Name)
-					for _, listener := range c.listeners {
+					for _, listener := range m.listeners {
 						listener(newContainerEvent(event.TimeNano, ctr, api.ContainerEventStarted))
 					}
 				}
-				if len(c.services) == 0 || c.services[ctr.Labels[api.ServiceLabel]] {
+				if len(m.services) == 0 || m.services[ctr.Labels[api.ServiceLabel]] {
 					containers.Add(ctr.ID)
 				}
 			case events.ActionRestart:
-				for _, listener := range c.listeners {
+				for _, listener := range m.listeners {
 					listener(newContainerEvent(event.TimeNano, ctr, api.ContainerEventRestarted))
 				}
 				logrus.Debugf("container %s restarted", ctr.Name)
 			case events.ActionDie:
 				logrus.Debugf("container %s exited with code %d", ctr.Name, ctr.ExitCode)
-				inspect, err := c.apiClient.ContainerInspect(ctx, event.Actor.ID, client.ContainerInspectOptions{})
+				inspect, err := m.apiClient.ContainerInspect(ctx, event.Actor.ID, client.ContainerInspectOptions{})
 				if errdefs.IsNotFound(err) {
 					// Source is already removed
 				} else if err != nil {
@@ -148,13 +148,13 @@ func (c *monitor) Start(ctx context.Context) error {
 					// container state still is reported as "running"
 					logrus.Debugf("container %s is restarting", ctr.Name)
 					restarting.Add(ctr.ID)
-					for _, listener := range c.listeners {
+					for _, listener := range m.listeners {
 						listener(newContainerEvent(event.TimeNano, ctr, api.ContainerEventExited, func(e *api.ContainerEvent) {
 							e.Restarting = true
 						}))
 					}
 				} else {
-					for _, listener := range c.listeners {
+					for _, listener := range m.listeners {
 						listener(newContainerEvent(event.TimeNano, ctr, api.ContainerEventExited))
 					}
 					containers.Remove(ctr.ID)
@@ -187,13 +187,13 @@ func newContainerEvent(timeNano int64, ctr *api.ContainerSummary, eventType int,
 	return event
 }
 
-func (c *monitor) getContainerSummary(event events.Message) (*api.ContainerSummary, error) {
+func (m *monitor) getContainerSummary(event events.Message) (*api.ContainerSummary, error) {
 	ctr := &api.ContainerSummary{
 		ID:      event.Actor.ID,
 		Name:    event.Actor.Attributes["name"],
-		Project: c.project,
+		Project: m.projectName,
 		Service: event.Actor.Attributes[api.ServiceLabel],
-		Labels:  event.Actor.Attributes, // More than just labels, but that'c the closest the API gives us
+		Labels:  event.Actor.Attributes, // More than just labels, but that's the closest the API gives us
 	}
 	if ec, ok := event.Actor.Attributes["exitCode"]; ok {
 		exitCode, err := strconv.Atoi(ec)
@@ -205,6 +205,6 @@ func (c *monitor) getContainerSummary(event events.Message) (*api.ContainerSumma
 	return ctr, nil
 }
 
-func (c *monitor) withListener(listener api.ContainerEventListener) {
-	c.listeners = append(c.listeners, listener)
+func (m *monitor) withListener(listener api.ContainerEventListener) {
+	m.listeners = append(m.listeners, listener)
 }

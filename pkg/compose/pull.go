@@ -50,7 +50,7 @@ func (s *composeService) Pull(ctx context.Context, project *types.Project, optio
 	}, "pull", s.events)
 }
 
-func (s *composeService) pull(ctx context.Context, project *types.Project, opts api.PullOptions) error { //nolint:gocyclo
+func (s *composeService) pull(ctx context.Context, project *types.Project, options api.PullOptions) error { //nolint:gocyclo
 	images, _, err := s.getLocalImagesDigests(ctx, project)
 	if err != nil {
 		return err
@@ -93,7 +93,7 @@ func (s *composeService) pull(ctx context.Context, project *types.Project, opts 
 			continue
 		}
 
-		if service.Build != nil && opts.IgnoreBuildable {
+		if service.Build != nil && options.IgnoreBuildable {
 			s.events.On(api.Resource{
 				ID:      "Image " + service.Image,
 				Status:  api.Done,
@@ -111,13 +111,13 @@ func (s *composeService) pull(ctx context.Context, project *types.Project, opts 
 
 		idx := i
 		eg.Go(func() error {
-			err := s.pullServiceImage(ctx, service, opts.Quiet, project.Environment["DOCKER_DEFAULT_PLATFORM"])
+			err := s.pullServiceImage(ctx, service, options.Quiet, project.Environment["DOCKER_DEFAULT_PLATFORM"])
 			if err != nil {
 				pullErrors[idx] = err
 				if service.Build != nil {
 					mustBuild = append(mustBuild, service.Name)
 				}
-				if !opts.IgnoreFailures && service.Build == nil {
+				if !options.IgnoreFailures && service.Build == nil {
 					if s.dryRun {
 						s.events.On(errorEventf("Image "+service.Image,
 							"error pulling image: %s", service.Image))
@@ -165,8 +165,8 @@ func (s *composeService) pull(ctx context.Context, project *types.Project, opts 
 			imagesBeingPulled[img] = name
 			hookService := types.ServiceConfig{Name: name, Image: img}
 			eg.Go(func() error {
-				err := s.pullServiceImage(ctx, hookService, opts.Quiet, project.Environment["DOCKER_DEFAULT_PLATFORM"])
-				if err != nil && !opts.IgnoreFailures {
+				err := s.pullServiceImage(ctx, hookService, options.Quiet, project.Environment["DOCKER_DEFAULT_PLATFORM"])
+				if err != nil && !options.IgnoreFailures {
 					// fail fast: a hook image can't be built as a fallback
 					return err
 				}
@@ -184,7 +184,7 @@ func (s *composeService) pull(ctx context.Context, project *types.Project, opts 
 	if err != nil {
 		return err
 	}
-	if opts.IgnoreFailures {
+	if options.IgnoreFailures {
 		return nil
 	}
 	return errors.Join(pullErrors...)
@@ -556,8 +556,8 @@ func isServiceImageToBuild(service types.ServiceConfig, services types.Services)
 
 	// look through the other services to see if another has a build definition for the same
 	// image name
-	for _, svc := range services {
-		if svc.Image == service.Image && svc.Build != nil {
+	for _, candidate := range services {
+		if candidate.Image == service.Image && candidate.Build != nil {
 			return true
 		}
 	}
