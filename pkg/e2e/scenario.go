@@ -65,6 +65,7 @@ type stepRecord struct {
 type containerState struct {
 	ID     string
 	Name   string
+	State  string
 	Labels map[string]string
 }
 
@@ -259,8 +260,11 @@ func (s *Scenario) snapshot() snapshot {
 		return snap
 	}
 	var containers []struct {
-		ID     string `json:"Id"`
-		Name   string `json:"Name"`
+		ID    string `json:"Id"`
+		Name  string `json:"Name"`
+		State struct {
+			Status string `json:"Status"`
+		} `json:"State"`
 		Config struct {
 			Labels map[string]string `json:"Labels"`
 		} `json:"Config"`
@@ -273,6 +277,7 @@ func (s *Scenario) snapshot() snapshot {
 		snap[service] = append(snap[service], containerState{
 			ID:     c.ID,
 			Name:   strings.TrimPrefix(c.Name, "/"),
+			State:  c.State.Status,
 			Labels: c.Config.Labels,
 		})
 	}
@@ -416,6 +421,15 @@ type CheckContext struct {
 	curr     snapshot
 }
 
+// refresh re-observes the project state, so subsequent checks of the same
+// step see the latest state rather than the one captured right after the
+// command returned.
+func (ctx *CheckContext) refresh() {
+	s := ctx.scenario
+	ctx.curr = s.snapshot()
+	s.snaps[len(s.snaps)-1] = ctx.curr
+}
+
 // Check is a named observable expected to hold after a step.
 type Check struct {
 	name string
@@ -444,6 +458,49 @@ func OutputNotContains(sub string) Check {
 		fn: func(ctx *CheckContext) error {
 			if strings.Contains(ctx.result.Combined(), sub) {
 				return fmt.Errorf("found in output")
+			}
+			return nil
+		},
+	}
+}
+
+// Eventually retries a state-based check until it holds or the timeout
+// expires, re-observing the project state between attempts. Output-based
+// checks are not meaningful here: the step's output never changes.
+func Eventually(check Check, timeout time.Duration) Check {
+	return Check{
+		name: fmt.Sprintf("%s within %s", check.name, timeout),
+		fn: func(ctx *CheckContext) error {
+			deadline := time.Now().Add(timeout)
+			for {
+				err := check.fn(ctx)
+				if err == nil {
+					return nil
+				}
+				if time.Now().After(deadline) {
+					return err
+				}
+				time.Sleep(500 * time.Millisecond)
+				ctx.refresh()
+			}
+		},
+	}
+}
+
+// ServiceState expects every container of the service to be in the given
+// state (running, exited, restarting, …).
+func ServiceState(service, state string) Check {
+	return Check{
+		name: fmt.Sprintf("service %q is %s", service, state),
+		fn: func(ctx *CheckContext) error {
+			containers := ctx.curr[service]
+			if len(containers) == 0 {
+				return fmt.Errorf("service has no container")
+			}
+			for _, c := range containers {
+				if c.State != state {
+					return fmt.Errorf("container %s is %s", c.Name, c.State)
+				}
 			}
 			return nil
 		},
